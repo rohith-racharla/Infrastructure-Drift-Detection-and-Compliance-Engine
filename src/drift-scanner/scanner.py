@@ -32,6 +32,7 @@ from botocore.exceptions import ClientError
 
 from classifier import DriftClassifier, DriftClassification, get_severity_summary
 from reporter import DriftReporter
+from aws_auditor import run_aws_audit
 
 # Configure logging
 logger = logging.getLogger("drift-scanner")
@@ -331,9 +332,34 @@ def run_scan(
         if plan_json is None:
             raise RuntimeError("Terraform plan failed")
 
-    # Step 2: Classify drift
+    # Step 2: Classify drift from Terraform plan
     classifier = DriftClassifier()
     classifications = classifier.classify_plan(plan_json)
+
+    logger.info(
+        "Terraform plan classification: %d drifted resources",
+        len(classifications),
+    )
+
+    # Step 2.5: Run AWS API audit for unmanaged resources
+    try:
+        api_classifications = run_aws_audit(
+            tf_working_dir=config.tf_working_dir,
+            region=config.aws_region,
+        )
+        classifications.extend(api_classifications)
+        if api_classifications:
+            logger.info(
+                "AWS API audit found %d additional unmanaged resources",
+                len(api_classifications),
+            )
+    except Exception as e:
+        logger.error("AWS API audit failed (continuing): %s", e)
+
+    # Re-sort by severity (critical first) after merging
+    classifications.sort(
+        key=lambda c: c.severity.priority, reverse=True
+    )
 
     summary = get_severity_summary(classifications)
     logger.info(
